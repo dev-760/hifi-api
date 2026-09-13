@@ -1,0 +1,13 @@
+# Exclude files from Vercel deployment
+tests/
+tidal_auth/
+.github/
+.env
+token.json
+proxies.txt
+*.pyc
+__pycache__/
+.pytest_cache/
+.git/
+Dockerfile
+docker-compose.yml
