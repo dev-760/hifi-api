@@ -818,7 +818,7 @@ async def cancel_playback_request(request_id: str):
 
 @app.get("/")
 async def index():
-    return {"version": API_VERSION, "Repo": "https://github.com/binimum/hifi-api"}
+    return "hifi-api for tapedack by dev"
 
 @app.get("/info/")
 async def get_info(id: int):

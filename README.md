@@ -176,6 +176,26 @@ python main.py
 
 ### Docker Deployment
 
+#### Prerequisites
+
+1. **Create .env file** with your Tidal credentials:
+```bash
+cp .env.example .env
+# Edit .env and add your credentials from token.json
+```
+
+2. **Your .env file should contain:**
+```bash
+CLIENT_ID=your_client_id
+CLIENT_SECRET=your_client_secret
+USER_ID=your_user_id
+REFRESH_TOKEN=your_refresh_token
+COUNTRY_CODE=US
+
+USE_PROXIES=False
+DEV_MODE=False
+```
+
 #### Using Docker Compose (Recommended)
 
 ```bash
@@ -198,11 +218,10 @@ docker-compose up -d --build
 # Build the image
 docker build -t hifi-api .
 
-# Run the container
+# Run the container with environment variables
 docker run -d \
   -p 8000:8000 \
   --env-file .env \
-  -v $(pwd)/token.json:/app/token.json:ro \
   -v $(pwd)/logs:/app/logs \
   --name hifi-api \
   hifi-api
@@ -218,8 +237,9 @@ docker rm hifi-api
 #### Docker Features
 
 - **Security**: Runs as non-root user
+- **Environment Variables**: Credentials loaded from .env file
 - **Health Checks**: Automatic health monitoring
-- **Volume Mounts**: Separate credential and log management
+- **Volume Mounts**: Log management
 - **Auto-restart**: Container restarts on failure
 - **Optimized Caching**: Efficient layer caching for faster builds
 

@@ -12,9 +12,8 @@ services:
       - .env
     environment:
       - PYTHONUNBUFFERED=1
-      - DEV_MODE=${DEV_MODE:-False}
     volumes:
-      # Mount token.json for credentials (read-only for security)
+      # Optional: Mount token.json as fallback (read-only for security)
       - ./token.json:/app/token.json:ro
       # Optional: Mount logs directory
       - ./logs:/app/logs
