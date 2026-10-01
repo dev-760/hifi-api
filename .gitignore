@@ -130,6 +130,13 @@ celerybeat.pid
 
 # Downloaded audio and credentials
 token.json
+# Credential rotation backups and audit trail - must never be committed.
+.credential-backup/
+*.json.bak
+# Test artifacts from tests/live_smoke.py
+live_probe_results.json
+live_openapi.json
+live_samples.json
 downloads/
 logs/
 .venv
