@@ -451,31 +451,6 @@ vercel --prod
 7. **Keep `ENABLE_DOWNLOADS=False`** unless you accept the account-ban risk;
    if you enable it, add API authentication first
 
-### Testing
-
-The offline suite covers manifest parsing, path sanitisation and the download
-endpoints. It needs no Tidal credentials and makes no network calls:
-
-```bash
-python -m pytest tests/test_manifest.py tests/test_download_api.py -q
-```
-
-`tests/local_e2e.py` runs the complete download pipeline against a **fake Tidal
-and fake CDN** served on localhost. It makes real HTTP requests and real file
-writes, but never contacts Tidal and never uses your credentials, so it is safe
-to run any time:
-
-```bash
-python tests/local_e2e.py
-```
-
-It verifies manifest parsing for both BTS and DASH, the extension mapping,
-segment concatenation, filename templating, skip-existing behaviour, atomic
-writes, and the disabled/serverless gates.
-
-`tests/test_endpoints.py` is a separate live smoke test against a running
-server: `python tests/test_endpoints.py`.
-
 ## Project Structure
 
 ```
@@ -518,6 +493,47 @@ All endpoints return JSON in the following format:
   "data": { ... }
 }
 ```
+
+## Documentation
+
+| Document | Covers |
+| --- | --- |
+| [LIVE_API_SCHEMA.md](LIVE_API_SCHEMA.md) | Every endpoint, captured from the live deployment at `https://hifi-api00.vercel.app` |
+| [API_SCHEMA.md](API_SCHEMA.md) | The download endpoints in detail |
+| [EXPO_INTEGRATION.md](EXPO_INTEGRATION.md) | React Native / Expo client wiring, including offline downloads |
+| `GET /openapi.json` | Machine-readable schema (live server) |
+| `/docs` | Browsable Swagger UI (live server) |
+
+## Testing
+
+The offline suite covers manifest parsing, path sanitisation and the download
+endpoints. It needs no Tidal credentials and makes no network calls:
+
+```bash
+python -m pytest tests/test_manifest.py tests/test_download_api.py -q
+```
+
+`tests/local_e2e.py` runs the complete download pipeline against a **fake Tidal
+and fake CDN** served on localhost. It makes real HTTP requests and real file
+writes, but never contacts Tidal and never uses your credentials, so it is safe
+to run any time:
+
+```bash
+python tests/local_e2e.py
+```
+
+`tests/live_smoke.py` probes a deployed instance read-only. It is the only test
+that touches the network, and it never starts a download:
+
+```bash
+python tests/live_smoke.py
+```
+
+`tests/decode_live_manifest.py` parses a genuine Tidal manifest captured from
+the live API, keeping the parser honest against real upstream data.
+
+`tests/test_endpoints.py` is a separate live smoke test against a running
+server: `python tests/test_endpoints.py`.
 
 ## Contributing
 

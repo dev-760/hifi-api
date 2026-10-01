@@ -4,6 +4,11 @@ Reference for the download endpoints added to `hifi-api`. For the rest of the
 API see the [main README](README.md); for client wiring see
 [EXPO_INTEGRATION.md](EXPO_INTEGRATION.md).
 
+> For a schema covering **every** endpoint — including metadata, search and
+> playback — captured from the live deployment, see
+> [LIVE_API_SCHEMA.md](LIVE_API_SCHEMA.md). This document covers the download
+> feature only.
+
 Machine-readable schema is always available at `GET /openapi.json` on a running
 server, with browsable docs at `/docs`.
 
