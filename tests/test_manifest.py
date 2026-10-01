@@ -1,7 +1,8 @@
 """Unit tests for manifest parsing and download path handling.
 
 These are offline tests: they exercise pure functions against synthetic
-manifests, so they need no Tidal credentials and make no network calls.
+manifests plus one genuine manifest captured from the live Tidal API, so they
+need no credentials and make no network calls.
 
 Run with:
     python -m pytest tests/test_manifest.py -q
@@ -44,11 +45,17 @@ def encode_bts(
 
 
 def encode_dash(
-    urls_template: str, codecs: str, repeats: list[int | None]
+    urls_template: str,
+    codecs: str,
+    repeats: list[int | None],
+    start_number: int | None = None,
 ) -> str:
     segments = "".join(
         f'<S d="1000" r="{r}"/>' if r is not None else '<S d="1000"/>'
         for r in repeats
+    )
+    start_attr = (
+        f' startNumber="{start_number}"' if start_number is not None else ""
     )
     xml = (
         '<?xml version="1.0" encoding="UTF-8"?>'
@@ -56,12 +63,52 @@ def encode_dash(
         "<Period>"
         '<AdaptationSet mimeType="audio/mp4">'
         f'<Representation codecs="{codecs}">'
-        f'<SegmentTemplate media="{urls_template}" initialization="init.mp4">'
+        f'<SegmentTemplate media="{urls_template}"{start_attr}>'
         f"<SegmentTimeline>{segments}</SegmentTimeline>"
         "</SegmentTemplate>"
         "</Representation>"
         "</AdaptationSet>"
         "</Period>"
+        "</MPD>"
+    )
+    return b64encode(xml.encode()).decode()
+
+
+def encode_broken_dash() -> str:
+    """A manifest shaped exactly like the live Tidal ones.
+
+    Reproduces all four defects seen in a real capture: a duplicated attribute,
+    no ``Period``/``AdaptationSet`` wrapper, an unterminated ``initialization``
+    attribute whose value runs into ``</AdaptationSet>``, and a root that closes
+    as ``</MAP>`` instead of ``</MPD>``.
+    """
+    xml = (
+        "<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" "
+        "xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
+        "value=\"main\" segmentAlignment=\"true\" group=\"main\" "
+        "segmentAlignment=\"true\">"
+        '<Role schemeIDUri="urn:mpe:dash:role:2011" value="main"/>'
+        '<Representation id="FLC,44100,16" codecs="flac" bangwidth="962275" '
+        'audioSamplingRate="44100"/>'
+        '<AudioChannelConfiguration schemeId="urn:mpeg:dash:counter:2003" '
+        'value="2"/>'
+        '<SegmentTemplate timescale="4410" initialization="https://sp-ad-cf.audio'
+        '.tidal.com/mediatracks/AbCdEf123/0.mp4/Policy=eyJQb2xpY3kiOlt7IlJl'
+        'c291cmNlIjoiaHR0cHM6Ly9zcC1hZC1jZiJ9XX0%3D&amp;Signature=XxYyZ012'
+        '3QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbg9wcXJzdHV2d3d4eXox'
+        'MjM0NTY3ODkwQUJDREVG'
+        "</AddaptationSet><Period></Period></MAP>"
+    )
+    return b64encode(xml.encode()).decode()
+
+
+def encode_dash_flat() -> str:
+    """Representation directly under MPD with a BaseURL, as Tidal sometimes emits."""
+    xml = (
+        '<MPD xmlns="urn:mpeg:dash:schema:mpd:2011">'
+        '<Representation codecs="flac" audioSamplingRate="44100">'
+        "<BaseURL>https://cdn/whole.flac</BaseURL>"
+        "</Representation>"
         "</MPD>"
     )
     return b64encode(xml.encode()).decode()
@@ -127,7 +174,8 @@ class TestEncryption:
 
 class TestDashManifest:
     def test_expands_number_placeholder(self):
-        # Two explicit segments plus one with r="2" -> 1 + 1 + (1 + 2) = 5 urls
+        # Two explicit segments plus one with r="2" -> 1 + 1 + (1 + 2) = 5 urls.
+        # DASH segment numbering starts at 1 unless startNumber says otherwise.
         manifest = parse_manifest(
             encode_dash(
                 "https://cdn/seg$Number$.mp4", "mp4a.40.2", [None, None, 2]
@@ -135,8 +183,42 @@ class TestDashManifest:
             MANIFEST_MIME_DASH,
         )
         assert len(manifest.urls) == 5
-        assert manifest.urls[0] == "https://cdn/seg0.mp4"
-        assert manifest.urls[-1] == "https://cdn/seg4.mp4"
+        assert manifest.urls[0] == "https://cdn/seg1.mp4"
+        assert manifest.urls[-1] == "https://cdn/seg5.mp4"
+
+    def test_respects_start_number(self):
+        manifest = parse_manifest(
+            encode_dash(
+                "https://cdn/seg$Number$.mp4", "mp4a.40.2", [None, None],
+                start_number=7,
+            ),
+            MANIFEST_MIME_DASH,
+        )
+        assert manifest.urls == [
+            "https://cdn/seg7.mp4",
+            "https://cdn/seg8.mp4",
+        ]
+
+    def test_unterminated_initialization_attribute(self):
+        # Regression for real Tidal manifests: the initialization attribute has
+        # no closing quote and the base64 payload runs into </AdaptationSet>,
+        # which no conforming XML parser accepts.
+        manifest = parse_manifest(encode_broken_dash(), MANIFEST_MIME_DASH)
+        assert manifest.codecs == "flac"
+        assert manifest.encryption_type == "NONE"
+        assert len(manifest.urls) == 1
+        assert manifest.urls[0].startswith(
+            "https://sp-ad-cf.audio.tidal.com/mediatracks/"
+        )
+        # XML entities inside the URL must be decoded back to raw characters.
+        assert "&amp;Signature=" not in manifest.urls[0]
+        assert "&Signature=" in manifest.urls[0]
+
+    def test_representation_without_period_wrapper(self):
+        # Real manifests place Representation directly under MPD.
+        manifest = parse_manifest(encode_dash_flat(), MANIFEST_MIME_DASH)
+        assert manifest.codecs == "flac"
+        assert manifest.urls == ["https://cdn/whole.flac"]
 
     def test_single_segment(self):
         manifest = parse_manifest(

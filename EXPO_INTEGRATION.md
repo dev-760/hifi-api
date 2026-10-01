@@ -679,11 +679,13 @@ npx expo install react-native-screens react-native-safe-area-context
 ## Step 10: Test Your Integration
 
 1. **Start your local API** (if testing locally):
+
    ```bash
    python main.py
    ```
 
 2. **Start your Expo app**:
+
    ```bash
    npx expo start
    ```
@@ -712,22 +714,28 @@ export default API_CONFIG;
 ## Common Issues and Solutions
 
 ### CORS Issues
+
 If you encounter CORS errors, ensure your API's CORS middleware is configured correctly. The hifi-api already has CORS enabled with `allow_origins=["*"]`.
 
 ### Network Security
+
 For production, consider:
+
 - Adding authentication to your API
 - Using HTTPS only
 - Implementing rate limiting
 - Adding error handling for network issues
 
 ### Audio Playback
+
 For better audio handling, consider using:
+
 - `expo-av` for basic playback
 - `react-native-track-player` for advanced features
 - Background audio support for music apps
 
 ### Performance
+
 - Implement caching for frequently accessed data
 - Use pagination for large result sets
 - Optimize image loading with caching
@@ -741,3 +749,379 @@ For better audio handling, consider using:
 5. **Add analytics**: Track user behavior and API usage
 
 This integration provides a solid foundation for your music app connected to the hifi-api!
+
+---
+
+# Offline Downloads
+
+Optional section for caching hi-res audio on-device. See
+[API_SCHEMA.md](API_SCHEMA.md) for the exact request and response contracts.
+
+## How it works
+
+There are two ways to get audio onto the device, and the right choice depends
+on whether the API is running where you can reach a filesystem.
+
+> ⚠️ The live deployment at `https://hifi-api00.vercel.app` currently returns
+> `500` from `/download/resolve/` because it runs a build from before the DASH
+> parser was fixed. Run the API locally or with Docker while testing, and see
+> [API_SCHEMA.md](API_SCHEMA.md#known-upstream-quirks) for details.
+
+### Option A — Resolve, then fetch on-device (recommended)
+
+The API returns short-lived CDN URLs; the app downloads and concatenates them.
+Nothing is written to the API host, so this works even against a Vercel
+deployment.
+
+```
+GET /download/resolve/  ──►  [seg0, seg1, seg2]
+        │
+        └─ app fetches each URL, concatenates, writes to disk
+```
+
+**Prefer this when** the API is on Vercel, you want per-user storage, or you
+would rather not have audio pass through the server twice.
+
+### Option B — Ask the server to write the file
+
+```
+POST /download/track/  ──►  { status: "downloaded", path: "..." }
+```
+
+The file lands on the **API host**, not on the phone. This is only useful if
+you also mount that directory over a network share, or run the API on the same
+LAN as a desktop player. On Vercel it returns `501` — there is no persistent
+filesystem.
+
+For a phone app, Option A is almost always what you want.
+
+## Step 1: Install the extra dependencies
+
+```bash
+npx expo install expo-file-system
+npx expo install expo-media-library   # save into the user's music library
+```
+
+`expo-file-system` differs by SDK generation. This guide uses the **new**
+(async) API, which requires Expo SDK 52+:
+
+```bash
+npx expo install expo@latest
+```
+
+If you are on an older SDK, see [Legacy API](#legacy-file-system-api) below.
+
+## Step 2: Add the download service
+
+Create `src/services/downloadService.js`:
+
+```javascript
+// src/services/downloadService.js
+import { API_BASE_URL } from '../config/api';
+import { File, Directory, Paths } from 'expo-file-system';
+import * as MediaLibrary from 'expo-media-library';
+
+// Tracks currently downloading, so the UI can show progress and dedupe calls.
+const active = new Map();
+
+/**
+ * Handles the 202 queue response that any playback-credential endpoint may
+ * return when every account is busy.
+ */
+async function resolveOrPoll(path, params = {}, attempt = 0) {
+  const query = new URLSearchParams(params).toString();
+  const url = `${API_BASE_URL}${path}${query ? `?${query}` : ''}`;
+
+  const res = await fetch(url);
+
+  if (res.status === 202) {
+    if (attempt > 60) throw new Error('Timed out waiting for a free account');
+
+    const wait = Number(res.headers.get('retry-after') || 1);
+    const location = res.headers.get('location');
+    await new Promise((r) => setTimeout(r, wait * 1000));
+    return resolveOrPoll(location, {}, attempt + 1);
+  }
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || `Request failed (${res.status})`);
+  }
+
+  return res.json();
+}
+
+/** Step 1: ask the API for segment URLs. */
+export async function resolveTrack(trackId, quality = 'HI_RES_LOSSLESS') {
+  return resolveOrPoll('/download/resolve/', { id: trackId, quality });
+}
+
+/**
+ * Step 2: fetch every segment and concatenate them into one file.
+ *
+ * Segments are fetched in order. The output is written incrementally via a
+ * FileHandle in Append mode so a 24-bit/192 kHz track never has to be held in
+ * memory in one piece.
+ */
+export async function downloadTrack(trackId, options = {}) {
+  const { quality = 'HI_RES_LOSSLESS', onProgress, filename } = options;
+
+  if (active.has(trackId)) return active.get(trackId);
+
+  const task = (async () => {
+    const manifest = await resolveTrack(trackId, quality);
+
+    // Strip characters that are illegal in filenames on any platform.
+    const safeName = (filename || String(manifest.trackId))
+      .replace(/[/\\?%*:|"<>]/g, '_')
+      .slice(0, 120);
+
+    const dir = new Directory(Paths.document, 'tidal');
+    if (!dir.exists) dir.create({ intermediates: true });
+
+    const out = new File(dir, `${safeName}${manifest.fileExtension}`);
+    if (out.exists) out.delete();
+
+    const handle = out.open(FileMode.Append);
+    try {
+      for (let i = 0; i < manifest.urls.length; i += 1) {
+        // Download to cache first; downloadFileAsync needs a File/Directory.
+        const segment = await File.downloadFileAsync(
+          manifest.urls[i],
+          new Directory(Paths.cache),
+        );
+
+        // Append the segment's bytes to the output file.
+        const bytes = await segment.bytes();
+        handle.writeBytes(bytes);
+        segment.delete();
+
+        if (onProgress) {
+          onProgress({
+            stage: 'downloading',
+            done: i + 1,
+            total: manifest.urls.length,
+            bytesWritten: out.size,
+          });
+        }
+      }
+    } finally {
+      handle.close();
+    }
+
+    if (onProgress) onProgress({ stage: 'done', uri: out.uri });
+
+    return {
+      uri: out.uri,
+      size: out.size,
+      quality,
+      extension: manifest.fileExtension,
+      needsFlacExtraction: manifest.needsFlacExtraction,
+    };
+  })();
+
+  active.set(trackId, task);
+  try {
+    return await task;
+  } finally {
+    active.delete(trackId);
+  }
+}
+
+/** Save into the user's visible music library. */
+export async function saveToLibrary(uri, title, artist, album) {
+  const perm = await MediaLibrary.requestPermissionsAsync();
+  if (!perm.granted) throw new Error('Media library permission denied');
+
+  await MediaLibrary.saveToLibraryAsync(uri, title, artist, album);
+}
+
+/** Remove a previously downloaded file. */
+export async function deleteDownload(uri) {
+  const file = new File(uri);
+  if (file.exists) file.delete();
+}
+```
+
+> **Note:** the download is driven by the server's `/download/resolve/`
+> response, so no Tidal credentials ever reach the device.
+
+## Step 3: Download hook
+
+Create `src/hooks/useDownload.js`:
+
+```javascript
+// src/hooks/useDownload.js
+import { useState, useCallback } from 'react';
+import { downloadTrack, deleteDownload } from '../services/downloadService';
+
+export const useDownload = () => {
+  const [progress, setProgress] = useState(null);
+  const [error, setError] = useState(null);
+  const [downloaded, setDownloaded] = useState(null);
+
+  const download = useCallback(async (trackId, options = {}) => {
+    setError(null);
+    setDownloaded(null);
+
+    try {
+      const result = await downloadTrack(trackId, {
+        ...options,
+        onProgress: setProgress,
+      });
+      setProgress(null);
+      setDownloaded(result);
+      return result;
+    } catch (err) {
+      setError(err.message);
+      setProgress(null);
+      throw err;
+    }
+  }, []);
+
+  const remove = useCallback(async (uri) => {
+    await deleteDownload(uri);
+    setDownloaded(null);
+  }, []);
+
+  return { progress, error, downloaded, download, remove };
+};
+```
+
+## Step 4: Wire it into a component
+
+```javascript
+// src/components/DownloadButton.js
+import React from 'react';
+import { Pressable, Text, View, StyleSheet, Alert } from 'react-native';
+import { useDownload } from '../hooks/useDownload';
+import { saveToLibrary } from '../services/downloadService';
+
+export const DownloadButton = ({ track, quality = 'HI_RES_LOSSLESS' }) => {
+  const { progress, error, downloaded, download } = useDownload();
+
+  const onPress = async () => {
+    try {
+      const result = await download(track.id, {
+        quality,
+        // Avoid characters that are illegal in filenames.
+        filename: `${track.trackNumber ?? 0}. ${track.title}`,
+      });
+
+      // Optional: also drop it into the user's music library.
+      await saveToLibrary(
+        result.uri,
+        track.title,
+        track.artists?.[0]?.name ?? track.artist?.name,
+        track.album?.title,
+      );
+
+      Alert.alert('Downloaded', `Saved ${track.title}`);
+    } catch (err) {
+      Alert.alert('Download failed', err.message);
+    }
+  };
+
+  const busy = progress?.stage === 'downloading';
+
+  return (
+    <View>
+      <Pressable onPress={onPress} disabled={busy}>
+        <Text>{downloaded ? 'Downloaded' : busy ? 'Downloading...' : 'Download'}</Text>
+      </Pressable>
+
+      {busy && (
+        <Text style={styles.progress}>
+          {progress.segment ?? 0}/{progress.total} segments
+        </Text>
+      )}
+
+      {error && <Text style={styles.error}>{error}</Text>}
+    </View>
+  );
+};
+
+const styles = StyleSheet.create({
+  progress: { fontSize: 12, color: '#666' },
+  error: { fontSize: 12, color: 'crimson' },
+});
+```
+
+## Step 5: Enable network access
+
+On Android emulators and physical devices, `localhost` refers to the device
+itself, not your machine. Use your LAN IP instead:
+
+```javascript
+// src/config/api.js
+import { Platform } from 'react-native';
+
+const DEV_HOST = Platform.OS === 'android' ? '192.168.1.100' : 'localhost';
+
+export const API_BASE_URL = __DEV__
+  ? `http://${DEV_HOST}:8000`
+  : 'https://your-vercel-app.vercel.app';
+```
+
+On Android cleartext HTTP is blocked by default in release builds. For a local
+LAN build add a network security config, or use HTTPS.
+
+## Troubleshooting
+
+### Segments 403 or fail mid-download
+
+The URLs are short-lived and effectively single-use. Resolve and fetch in one
+pass — do not cache `manifest.urls` between sessions.
+
+### `422 Unsupported quality`
+
+Use `LOW`, `HIGH`, `LOSSLESS`, `HI_RES_LOSSLESS`, or the aliases `low`,
+`normal`, `lossless`, `max`. Note `high` means 320 kbps AAC here, not lossless.
+
+### `503 Downloads are disabled`
+
+Expected — downloads are opt-in. Set `ENABLE_DOWNLOADS=True` on the API host.
+Remember this only affects Option B; Option A works regardless.
+
+### `501` from `POST /download/track/`
+
+The API is on a serverless platform with no writable disk. Use Option A.
+
+### Concatenated file will not play
+
+Check the extension matches `manifest.fileExtension`. For
+`HI_RES_LOSSLESS` the server-side result is `.m4a` containing FLAC; some
+players need `.m4a` and others need a remux, which is why the API reports
+`needsFlacExtraction`.
+
+## Legacy file-system API
+
+On Expo SDK < 52, replace the file operations in `downloadService.js`:
+
+```javascript
+import * as FileSystem from 'expo-file-system';
+
+const directory = `${FileSystem.documentDirectory}tidal/`;
+await FileSystem.makeDirectoryAsync(directory, { intermediates: true });
+const target = `${directory}${safeName}${manifest.fileExtension}`;
+
+const result = await FileSystem.createDownloadResumable(
+  manifest.urls[0],
+  target,
+  {},
+  (e) => { /* onProgress */ },
+).downloadAsync();
+
+// Legacy API cannot concatenate segments, so it only supports
+// single-segment (LOW/HIGH) results. For multi-segment tracks, fetch each
+// segment with fetch() and append with a legacy write.
+```
+
+Prefer upgrading to the current SDK if you need multi-segment hi-res.
+
+## Security
+
+The hifi-api has **no authentication**. Anyone who can reach it can spend your
+Tidal account's playback quota, and if `ENABLE_DOWNLOADS=True` they can pull
+audio through your IP. Do not expose it to the public internet without putting
+authentication in front of it.

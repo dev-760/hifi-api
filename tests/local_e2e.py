@@ -57,6 +57,7 @@ def _bts(codecs: str, urls: list[str], encryption: str = "NONE") -> str:
 
 
 def _dash(template: str, codecs: str, segments: int) -> str:
+    """A well-formed segmented DASH manifest (the ``media`` + timeline form)."""
     parts = "".join(f'<S d="1000"/>' for _ in range(segments))
     xml = (
         '<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static"><Period>'
@@ -65,6 +66,32 @@ def _dash(template: str, codecs: str, segments: int) -> str:
         f'<SegmentTemplate media="{template}">'
         f"<SegmentTimeline>{parts}</SegmentTimeline>"
         "</SegmentTemplate></Representation></AdaptationSet></Period></MPD>"
+    )
+    return base64.b64encode(xml.encode()).decode()
+
+
+def _dash_realistic(initialization_url: str, codecs: str = "flac") -> str:
+    """Reproduce the malformed shape real Tidal manifests have.
+
+    Live manifests are not valid XML: a duplicated attribute, no
+    Period/AdaptationSet wrapper, an unterminated ``initialization`` attribute
+    whose value runs into ``</AdaptationSet>``, and a root closing as ``MAP``.
+    The parser must cope, and this keeps that covered end to end.
+    """
+    xml = (
+        '<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" '
+        'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+        'value="main" segmentAlignment="true" group="main" '
+        'segmentAlignment="true">'
+        '<Role schemeIDUri="urn:mpe:dash:role:2011" value="main"/>'
+        f'<Representation id="FLC,44100,16" codecs="{codecs}" '
+        'bangwidth="962275" audioSamplingRate="44100"/>'
+        '<AudioChannelConfiguration schemeId="urn:mpeg:dash:counter:2003" '
+        'value="2"/>'
+        f'<SegmentTemplate timescale="4410" initialization="{initialization_url}'
+        "/0.mp4/Policy=eyJQb2xpY3kiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly9zcC1hZC1jZiJ9XX0"
+        "%3D&amp;Signature=XxYyZ0123QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbg"
+        "</AdaptationSet><Period></Period></MAP>"
     )
     return base64.b64encode(xml.encode()).decode()
 
@@ -80,12 +107,11 @@ async def playback_info(track_id: int, request: Request):
 
     quality = request.query_params.get("audioquality", "")
 
-    # HI_RES_LOSSLESS is served as FLAC-in-MP4 via DASH, like the real service.
+    # HI_RES_LOSSLESS is served as FLAC via DASH, matching the real service's
+    # malformed single-file shape (initialization URL, no SegmentTimeline).
     if quality == "HI_RES_LOSSLESS":
         return {
-            "manifest": _dash(
-                f"{FAKE_BASE}/cdn/seg$Number$.bin", "flac", segments=3
-            ),
+            "manifest": _dash_realistic(f"{FAKE_BASE}/cdn/signed.bin"),
             "manifestMimeType": "application/dash+xml",
             "audioQuality": quality,
             "audioMode": "STEREO",
@@ -121,6 +147,22 @@ async def cdn_b():
 async def cdn_seg(number: int):
     HITS[f"cdn_seg{number}"] = HITS.get(f"cdn_seg{number}", 0) + 1
     return Response(bytes([48 + number]) * 1024, media_type="application/octet-stream")
+
+
+@fake.get("/cdn/hires.bin")
+async def cdn_hires():
+    """Single-file payload, matching real HI_RES manifests."""
+    HITS["cdn_hires"] = HITS.get("cdn_hires", 0) + 1
+    return Response(b"HIRES-FLAC-PAYLOAD" * 64, media_type="application/octet-stream")
+
+
+# Real signed URLs put Policy/Signature in the path:
+#   /mediatracks/<id>/0.mp4/Policy=...&Signature=...
+# so the route matches the path prefix and tolerates the trailing segments.
+@fake.get("/cdn/signed.bin/{rest:path}")
+async def cdn_signed(rest: str):
+    HITS["cdn_signed"] = HITS.get("cdn_signed", 0) + 1
+    return Response(b"HIRES-FLAC-PAYLOAD" * 64, media_type="application/octet-stream")
 
 
 @fake.get("/v1/tracks/{track_id}/")
@@ -210,18 +252,28 @@ def main_test() -> int:
                     str(body["bitDepth"]),
                 )
 
-            print("\n2. Resolve (DASH manifest, HI_RES_LOSSLESS)")
+            print("\n2. Resolve (real-shaped DASH manifest, HI_RES_LOSSLESS)")
             r = client.get("/download/resolve/?id=194567102&quality=max")
             check("resolve returns 200", r.status_code ==
                   200, f"got {r.status_code}")
             if r.status_code == 200:
                 body = r.json()
-                check("three segments",
-                      body["urlCount"] == 3, str(body["urlCount"]))
+                check("single payload url",
+                      body["urlCount"] == 1, str(body["urlCount"]))
                 check("m4a extension", body["fileExtension"] == ".m4a")
                 check("needs extraction", body["needsFlacExtraction"] is True)
                 check("24-bit/192kHz", body["bitDepth"]
                       == 24 and body["sampleRate"] == 192000)
+                check(
+                    "url points at the CDN",
+                    body["urls"][0].startswith(FAKE_BASE),
+                    body["urls"][0][:60],
+                )
+                check(
+                    "xml entities decoded",
+                    "&amp;" not in body["urls"][0],
+                    body["urls"][0][-50:],
+                )
 
             print("\n3. Download to disk (LOSSLESS -> .flac)")
             r = client.post("/download/track/?id=194567102&quality=LOSSLESS")
@@ -257,7 +309,7 @@ def main_test() -> int:
             check("cdn not re-fetched", HITS.get("cdn_a", 0)
                   == 1, f"cdn_a hits={HITS.get('cdn_a')}")
 
-            print("\n5. HI_RES download (DASH -> FLAC-in-MP4)")
+            print("\n5. HI_RES download (real-shaped single-file DASH)")
             r = client.post(
                 "/download/track/?id=194567102&quality=HI_RES_LOSSLESS")
             check("hires returns 200", r.status_code == 200,
@@ -266,11 +318,12 @@ def main_test() -> int:
                 written = Path(r.json()["path"])
                 check("hires file exists", written.exists(), str(written))
                 check(
-                    "three dash segments fetched",
-                    HITS.get("cdn_seg0", 0) >= 1 and HITS.get(
-                        "cdn_seg2", 0) >= 1,
-                    f"hits={{k: v for k, v in HITS.items() if 'seg' in k} }",
+                    "full payload written",
+                    written.stat().st_size == len(b"HIRES-FLAC-PAYLOAD" * 64),
+                    f"{written.stat().st_size} bytes",
                 )
+                check("single url fetched once", HITS.get(
+                    "cdn_signed", 0) == 1, f"hits={HITS.get('cdn_signed')}")
 
             print("\n6. Validation and gating")
             check(

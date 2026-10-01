@@ -24,12 +24,10 @@ change upstream fails loudly instead of writing garbage to disk.
 from __future__ import annotations
 
 import json
+import re
 from base64 import b64decode
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal
-from xml.etree import ElementTree
-
-DASH_NS = "{urn:mpeg:dash:schema:mpd:2011}"
 
 MANIFEST_MIME_BTS = "application/vnd.tidal.bts"
 MANIFEST_MIME_DASH = "application/dash+xml"
@@ -139,98 +137,147 @@ def _parse_bts(decoded: str) -> tuple[List[str], str, str]:
     return cleaned, codecs, encryption
 
 
-def _dash_find(parent: ElementTree.Element, tag: str) -> ElementTree.Element | None:
-    """Find a direct child by local name, ignoring namespace.
+def _parse_dash_xml(decoded: str) -> tuple[List[str], str, str]:
+    """Extract segment URLs from a Tidal DASH MPD.
 
-    ``ElementTree.find`` only honours a ``{ns}`` prefix on the first step of a
-    path, so a nested path like ``Period/AdaptationSet/Representation`` cannot be
-    namespace-qualified throughout. Walking children by local name avoids that
-    limitation entirely.
+    Tidal's real manifests are **not valid XML**. A live ``LOSSLESS`` manifest
+    captured from the API has four independent defects:
+
+    1. ``segmentAlignment="true"`` is repeated on the same start tag.
+    2. ``<Representation>`` sits directly under ``<MPD>``, with no
+       ``<Period>`` or ``<AdaptationSet>`` wrapper.
+    3. The ``initialization`` attribute is **never terminated** - its value, a
+       base64 ``Policy``/``Signature`` blob, runs directly into ``</AdaptationSet>``.
+    4. The document ends with ``</MAP>`` instead of ``</MPD>``.
+
+    A conforming parser cannot read this, so rather than repairing malformed
+    XML with increasingly elaborate heuristics, the handful of attributes
+    actually needed are pulled out with targeted patterns. Two payload layouts
+    occur upstream:
+
+    * **Segmented** - a ``media`` template plus ``SegmentTimeline``, with
+      ``$Number$`` expanded across the segments.
+    * **Single file** - only an ``initialization`` URL and no timeline, meaning
+      the whole track is one URL.
     """
-    for child in parent:
-        if not isinstance(child.tag, str):
-            continue  # comments and processing instructions
-        local = child.tag.rsplit("}", 1)[-1]
-        if local == tag:
-            return child
+    codecs_match = re.search(r'codecs="([^"]*)"', decoded)
+    codecs = codecs_match.group(1) if codecs_match else ""
+
+    media_match = _extract_attribute(decoded, "media")
+    timeline_match = re.search(r"<SegmentTimeline\b", decoded)
+    init_match = _extract_attribute(decoded, "initialization")
+
+    start_number = _extract_attribute(decoded, "startNumber")
+
+    # Segmented layout: a media template expanded across the timeline.
+    if media_match and timeline_match:
+        total = _count_timeline_segments(decoded)
+        start = int(
+            start_number) if start_number and start_number.isdigit() else 1
+
+        if "$Number$" not in media_match:
+            if total != 1:
+                raise ManifestError(
+                    "DASH media template has no $Number$ placeholder but the "
+                    "timeline describes multiple segments"
+                )
+            return [media_match], codecs, "NONE"
+
+        return (
+            [
+                media_match.replace("$Number$", str(index))
+                for index in range(start, start + total)
+            ],
+            codecs,
+            "NONE",
+        )
+
+    # Single-file layout: one initialization URL, no timeline.
+    if init_match:
+        return [init_match], codecs, "NONE"
+
+    if media_match:
+        return [media_match], codecs, "NONE"
+
+    base_url = _extract_base_url(decoded)
+    if base_url:
+        return [base_url], codecs, "NONE"
+
+    raise ManifestError(
+        "DASH manifest contains neither a media template with a SegmentTimeline "
+        "nor an initialization URL"
+    )
+
+
+def _extract_attribute(xml_text: str, name: str) -> str | None:
+    """Pull one attribute value out of a possibly malformed document.
+
+    Handles both a properly quoted value and the live case where the value is
+    unterminated and runs until the stray closing markup begins.
+    """
+    quoted = re.search(rf'\b{name}="([^"]*)"', xml_text)
+    if quoted:
+        return _unescape_xml(quoted.group(1))
+
+    # Unterminated: the value runs on until a '<' that starts stray markup.
+    # Everything between the opening quote and that '<' is the value.
+    unterminated = re.search(rf'\b{name}="([^<]*)', xml_text)
+    if unterminated:
+        value = unterminated.group(1).rstrip()
+        return _unescape_xml(value) if value else None
+
     return None
 
 
-def _parse_dash_xml(decoded: str) -> tuple[List[str], str, str]:
-    """Parse a DASH MPD into segment URLs.
+def _extract_base_url(xml_text: str) -> str | None:
+    """Read a ``<BaseURL>`` element, which some manifests use instead of ``media``."""
+    match = re.search(r"<BaseURL[^>]*>([^<]+)</BaseURL>", xml_text, re.DOTALL)
+    if match:
+        value = match.group(1).strip()
+        return _unescape_xml(value) if value else None
+    return None
 
-    Only the first ``AdaptationSet``/``Representation`` is considered, which
-    matches the single-audio-representation manifests Tidal emits for tracks.
+
+def _count_timeline_segments(xml_text: str) -> int:
+    """Count segments described by a ``SegmentTimeline``.
+
+    Each ``<S>`` contributes one segment plus its ``r`` repeat count. A negative
+    ``r`` denotes a time-based timeline, which is rejected rather than
+    silently mis-expanded.
     """
-    try:
-        tree = ElementTree.fromstring(decoded)
-    except ElementTree.ParseError as exc:
-        raise ManifestError(f"DASH manifest is not valid XML: {exc}") from exc
+    timeline = re.search(
+        r"<SegmentTimeline\b[^>]*>(.*?)</SegmentTimeline>", xml_text, re.DOTALL)
+    if not timeline:
+        return 0
 
-    period = _dash_find(tree, "Period")
-    if period is None:
-        raise ManifestError("DASH manifest has no Period element")
-
-    adaptation_set = _dash_find(period, "AdaptationSet")
-    if adaptation_set is None:
-        raise ManifestError("DASH manifest has no AdaptationSet element")
-
-    representation = _dash_find(adaptation_set, "Representation")
-    if representation is None:
-        raise ManifestError("DASH manifest has no Representation element")
-
-    codecs = representation.get("codecs") or ""
-    if not codecs:
-        raise ManifestError("DASH manifest Representation has no codecs")
-
-    segment_template = _dash_find(representation, "SegmentTemplate")
-    if segment_template is None:
-        raise ManifestError("DASH manifest has no SegmentTemplate element")
-
-    url_template = segment_template.get("media")
-    if not url_template:
-        raise ManifestError("DASH SegmentTemplate has no media attribute")
-
-    timeline = _dash_find(segment_template, "SegmentTimeline")
-    if timeline is None:
-        raise ManifestError("DASH SegmentTemplate has no SegmentTimeline")
-
-    segments = timeline.findall(f"{DASH_NS}S")
-    if not segments:
-        raise ManifestError("DASH SegmentTimeline contains no segments")
-
-    # Each <S> element contributes one segment, plus `r` repeats. A negative `r`
-    # signals a time-based (rather than count-based) timeline, which Tidal does
-    # not use for track manifests, so it is rejected instead of mis-expanded.
+    body = timeline.group(1)
     total = 0
-    for segment in segments:
+    for match in re.finditer(r"<S\b([^>]*?)/?>", body):
         total += 1
-        repeats = segment.get("r")
-        if repeats is None:
-            continue
-        try:
-            repeat_count = int(repeats)
-        except ValueError as exc:
-            raise ManifestError(
-                f"DASH segment has non-numeric r={repeats!r}") from exc
-        if repeat_count < 0:
-            raise ManifestError(
-                "DASH SegmentTimeline uses negative repeat counts, which are "
-                "time-based and not supported"
-            )
-        total += repeat_count
+        repeat = re.search(r'\br="(-?\d+)"', match.group(1))
+        if repeat:
+            count = int(repeat.group(1))
+            if count < 0:
+                raise ManifestError(
+                    "DASH SegmentTimeline uses negative repeat counts, which are "
+                    "time-based and not supported"
+                )
+            total += count
 
-    if "$Number$" not in url_template:
-        if total != 1:
-            raise ManifestError(
-                "DASH media template has no $Number$ placeholder but the "
-                "timeline describes multiple segments"
-            )
-        return [url_template], codecs, "NONE"
+    return total
 
-    urls = [url_template.replace("$Number$", str(index))
-            for index in range(total)]
-    return urls, codecs, "NONE"
+
+def _unescape_xml(value: str) -> str:
+    """Decode the XML entities that appear in Tidal's URLs."""
+    if "&amp;" not in value and "&quot;" not in value and "&lt;" not in value:
+        return value
+    return (
+        value.replace("&amp;", "&")
+        .replace("&quot;", '"')
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&apos;", "'")
+    )
 
 
 def parse_manifest(
