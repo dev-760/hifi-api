@@ -127,6 +127,11 @@ celerybeat.pid
 .env
 .env.*
 !.env.example
+
+# Downloaded audio and credentials
+token.json
+downloads/
+logs/
 .venv
 env/
 venv/

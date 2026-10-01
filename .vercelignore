@@ -5,6 +5,8 @@ tidal_auth/
 .env
 token.json
 proxies.txt
+downloads/
+logs/
 *.pyc
 __pycache__/
 .pytest_cache/

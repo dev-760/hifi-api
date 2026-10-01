@@ -6,3 +6,7 @@ httpx[http2]==0.28.1
 python-dotenv==1.2.2
 rich==14.3.3
 uvicorn[standard]==0.42.0
+# Writes ID3/Vorbis tags onto downloaded audio (optional download feature).
+mutagen==1.47.0
+# Offline test suite for manifest parsing and the download endpoints.
+pytest==9.1.1

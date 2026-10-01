@@ -12,8 +12,11 @@ RUN groupadd -r appuser && useradd -r -g appuser appuser
 WORKDIR /app
 
 # Install system dependencies
+# ffmpeg/ffprobe are optional: they are only used to remux HI_RES_LOSSLESS
+# FLAC-in-MP4 into a real .flac. Without them the download still succeeds and
+# returns the .m4a container Tidal served.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends gcc && \
+    apt-get install -y --no-install-recommends gcc ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
@@ -27,11 +30,15 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY . .
 
 # Create necessary directories and set permissions
-RUN mkdir -p /app/logs && \
+RUN mkdir -p /app/logs /app/downloads && \
     chown -R appuser:appuser /app
 
 # Switch to non-root user
 USER appuser
+
+EXPOSE 8000
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
 
 # Expose port
 EXPOSE 8000

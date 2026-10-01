@@ -4,7 +4,7 @@ A Python FastAPI proxy for Tidal music streaming service, providing access to hi
 
 ## ⚠️ Important Warnings
 
-- **Account Blocking Risk**: Tidal actively blocks accounts using this API. Use at your own risk.
+- **Account Blocking Risk**: Tidal actively blocks accounts using this API. Use at your own risk. The download feature in particular is readily detected.
 - **Educational Use Only**: Intended for personal homelab use with valid Tidal accounts.
 - **No Public Hosting**: Do not host on the open internet to minimize detection risk.
 - **IP Exposure**: Your IP may be exposed to Tidal when using this service.
@@ -29,16 +29,19 @@ A Python FastAPI proxy for Tidal music streaming service, providing access to hi
 ### Installation
 
 1. **Clone the repository** (if not already done):
+
 ```bash
 cd hifi-api
 ```
 
-2. **Install dependencies**:
+1. **Install dependencies**:
+
 ```bash
 pip install -r requirements.txt
 ```
 
-3. **Set up Tidal authentication**:
+1. **Set up Tidal authentication**:
+
 ```bash
 cd tidal_auth
 pip install -r requirements.txt
@@ -46,19 +49,22 @@ python tidal_auth.py
 ```
 
 **Authentication Process:**
+
 - The script will display a URL (e.g., `link.tidal.com/XXXXX`)
 - Open the URL in your browser
 - Log in to your Tidal account
 - Click "Authorize" when prompted
 - The script will automatically save your credentials to `token.json`
 
-4. **Configure environment variables** (optional):
+1. **Configure environment variables** (optional):
+
 ```bash
 cp .env.example .env
 # Edit .env with your preferences
 ```
 
-5. **Run the server**:
+1. **Run the server**:
+
 ```bash
 python main.py
 ```
@@ -166,6 +172,77 @@ You can configure multiple Tidal accounts in `token.json`:
 - `GET /playback/requests/{request_id}` - Poll queued playback requests
 - `DELETE /playback/requests/{request_id}` - Cancel queued requests
 
+### Download Endpoints
+
+Downloads resolve a track's CDN segment URLs and (optionally) write the audio to
+disk. The manifest handling follows the approach used by
+[tiddl](https://github.com/oskvr37/tiddl) (Apache-2.0).
+
+- `GET /download/resolve/?id={track_id}&quality={quality}` - Return segment URLs
+  without downloading. Stateless, works on Vercel.
+- `POST /download/track/?id={track_id}&quality={quality}` - Download one track to
+  disk. Returns a 202 job reference when all playback accounts are busy.
+- `GET /download/requests/{request_id}` - Poll a download job
+
+Quality accepts Tidal's native names (`LOW`, `HIGH`, `LOSSLESS`,
+`HI_RES_LOSSLESS`) plus the aliases `low`, `normal`, `lossless`, `max`.
+
+> ⚠️ **Downloading is high risk.** Fetching full audio is far more detectable by
+> Tidal than ordinary streaming and is a common cause of account suspension.
+> Downloads are therefore **disabled by default** — set `ENABLE_DOWNLOADS=True`
+> to opt in, and consider proxy rotation.
+
+#### Two ways to download
+
+**Resolve only (recommended default).** Returns short-lived CDN URLs; the client
+fetches them. Costs you no bandwidth and works on serverless:
+
+```bash
+curl "http://localhost:8000/download/resolve/?id=194567102&quality=max"
+```
+
+**To disk.** Requires `ENABLE_DOWNLOADS=True` and a persistent filesystem.
+Refused with `501` on Vercel:
+
+```bash
+curl -X POST "http://localhost:8000/download/track/?id=194567102&quality=max"
+```
+
+#### How it works
+
+The v1 `playbackinfopaywall` manifest is **not** encrypted, unlike the v2
+manifests served by `/trackManifests/`. There are two shapes:
+
+| `manifestMimeType` | Format | Qualities |
+| --- | --- | --- |
+| `application/vnd.tidal.bts` | JSON with a `urls` array | LOW, HIGH, LOSSLESS |
+| `application/dash+xml` | MPEG-DASH MPD, `SegmentTemplate` | HI_RES_LOSSLESS, Atmos |
+
+Segments are fetched from `resources.tidal.com` without a credential, so the
+playback account is only held for the brief manifest call. Encrypted manifests
+are rejected rather than written to disk.
+
+`HI_RES_LOSSLESS` is served as FLAC-in-MP4 and needs `ffmpeg` to remux into a
+true `.flac`. Without ffmpeg the download still succeeds and returns the `.m4a`.
+Install it with `winget install Gyan.FFmpeg`, or use the Docker image (which
+includes it).
+
+#### Download configuration
+
+```bash
+ENABLE_DOWNLOADS=True
+DOWNLOAD_DIR=downloads
+DOWNLOAD_TEMPLATE={artist}/{album}/{number:02d}. {title}
+DOWNLOAD_QUALITY=HI_RES_LOSSLESS
+DOWNLOAD_SKIP_EXISTING=True
+DOWNLOAD_MAX_BYTES=2147483648
+```
+
+Every path component in `DOWNLOAD_TEMPLATE` is sanitised, so a track titled
+`../../etc/passwd` cannot escape `DOWNLOAD_DIR`. Files are written to a `.part`
+sibling and moved into place atomically, so an interrupted download never
+leaves a truncated file.
+
 ## Deployment
 
 ### Local Development
@@ -179,12 +256,14 @@ python main.py
 #### Prerequisites
 
 1. **Create .env file** with your Tidal credentials:
+
 ```bash
 cp .env.example .env
 # Edit .env and add your credentials from token.json
 ```
 
-2. **Your .env file should contain:**
+1. **Your .env file should contain:**
+
 ```bash
 CLIENT_ID=your_client_id
 CLIENT_SECRET=your_client_secret
@@ -254,27 +333,32 @@ docker rm hifi-api
 #### Deployment Steps
 
 1. **Install Vercel CLI** (if not already installed):
+
 ```bash
 npm install -g vercel
 ```
 
-2. **Login to Vercel**:
+1. **Login to Vercel**:
+
 ```bash
 vercel login
 ```
 
-3. **Deploy**:
+1. **Deploy**:
+
 ```bash
 vercel
 ```
 
 Follow the prompts:
+
 - Set up and deploy: `Yes`
 - Select your account scope
 - Project name: `hifi-api` (or your preferred name)
 - Directory: `./` (current directory)
 
-4. **Set Environment Variables**:
+1. **Set Environment Variables**:
+
 ```bash
 vercel env add COUNTRY_CODE
 # Enter: US
@@ -283,10 +367,11 @@ vercel env add DEV_MODE
 # Enter: False
 ```
 
-5. **Handle token.json for Vercel**:
+1. **Handle token.json for Vercel**:
 
 **Option A - Environment Variables (Recommended):**
 Extract values from your `token.json` and set them as individual environment variables:
+
 ```bash
 vercel env add CLIENT_ID
 vercel env add CLIENT_SECRET
@@ -295,11 +380,13 @@ vercel env add USER_ID
 ```
 
 **Option B - Include token.json (Less Secure):**
+
 - Temporarily remove `token.json` from `.vercelignore`
 - Redeploy with `vercel --prod`
 - Add `token.json` back to `.vercelignore`
 
-6. **Production Deployment**:
+1. **Production Deployment**:
+
 ```bash
 vercel --prod
 ```
@@ -361,6 +448,33 @@ vercel --prod
 4. **Consider adding API authentication** for additional security
 5. **Monitor account status** for any blocking activity
 6. **Use proxy rotation** to minimize IP exposure
+7. **Keep `ENABLE_DOWNLOADS=False`** unless you accept the account-ban risk;
+   if you enable it, add API authentication first
+
+### Testing
+
+The offline suite covers manifest parsing, path sanitisation and the download
+endpoints. It needs no Tidal credentials and makes no network calls:
+
+```bash
+python -m pytest tests/test_manifest.py tests/test_download_api.py -q
+```
+
+`tests/local_e2e.py` runs the complete download pipeline against a **fake Tidal
+and fake CDN** served on localhost. It makes real HTTP requests and real file
+writes, but never contacts Tidal and never uses your credentials, so it is safe
+to run any time:
+
+```bash
+python tests/local_e2e.py
+```
+
+It verifies manifest parsing for both BTS and DASH, the extension mapping,
+segment concatenation, filename templating, skip-existing behaviour, atomic
+writes, and the disabled/serverless gates.
+
+`tests/test_endpoints.py` is a separate live smoke test against a running
+server: `python tests/test_endpoints.py`.
 
 ## Project Structure
 
@@ -368,6 +482,14 @@ vercel --prod
 hifi-api/
 ├── api/
 │   └── index.py              # Vercel entry point
+├── download/
+│   ├── manifest.py           # BTS + DASH manifest parsing (pure, no I/O)
+│   ├── service.py            # Tidal calls, quality mapping, segment fetching
+│   ├── store.py              # Path templating, sanitisation, atomic writes
+│   └── ffmpeg.py             # Optional remuxing, degrades if ffmpeg absent
+├── tests/
+│   ├── test_manifest.py      # Offline parser + path safety tests
+│   └── test_download_api.py  # Endpoint tests with stubbed network
 ├── tidal_auth/
 │   ├── tidal_auth.py         # OAuth authentication script
 │   └── requirements.txt      # Auth dependencies
@@ -412,6 +534,7 @@ This project is for educational purposes only. Music piracy is illegal in most c
 ## Support
 
 For issues related to:
+
 - **Tidal API**: Check Tidal's official documentation
 - **Deployment**: Refer to deployment guides above
 - **Authentication**: Re-run the tidal_auth script

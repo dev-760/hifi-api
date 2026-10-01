@@ -7,6 +7,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Union
 
 import httpx
@@ -86,16 +87,19 @@ def _build_proxy_test_client(proxy_url: str) -> httpx.AsyncClient:
 async def lifespan(app: FastAPI):
     global _http_client, _http_client_proxy_url
     if DEV_MODE:
-        logger.warning("DEV_MODE is enabled — upstream responses will be logged at DEBUG level")
+        logger.warning(
+            "DEV_MODE is enabled — upstream responses will be logged at DEBUG level")
     if _http_client is None:
         proxy_url = None
         if USE_PROXIES:
             proxy_url = await get_working_proxy()
             if not proxy_url and not FALLBACK_TO_DIRECT_CONNECTION:
-                logger.error("Could not find a working proxy and FALLBACK_TO_DIRECT_CONNECTION is False. Shutting down.")
+                logger.error(
+                    "Could not find a working proxy and FALLBACK_TO_DIRECT_CONNECTION is False. Shutting down.")
                 raise RuntimeError("No working proxies available")
             elif not proxy_url and FALLBACK_TO_DIRECT_CONNECTION:
-                logger.warning("Could not find a working proxy, falling back to direct connection. HOST IP MAY BE EXPOSED!")
+                logger.warning(
+                    "Could not find a working proxy, falling back to direct connection. HOST IP MAY BE EXPOSED!")
         _http_client = _build_http_client(proxy_url)
         _http_client_proxy_url = proxy_url
     try:
@@ -140,9 +144,37 @@ CATALOG_REFRESH_TOKEN = os.getenv("CATALOG_REFRESH_TOKEN")
 CATALOG_USER_ID = os.getenv("CATALOG_USER_ID")
 
 USE_PROXIES = os.getenv("USE_PROXIES", "False").lower() in ("true", "1", "yes")
-ROTATE_PROXIES_ON_REFRESH = os.getenv("ROTATE_PROXIES_ON_REFRESH", "False").lower() in ("true", "1", "yes")
+ROTATE_PROXIES_ON_REFRESH = os.getenv(
+    "ROTATE_PROXIES_ON_REFRESH", "False").lower() in ("true", "1", "yes")
 PROXIES_FILE = os.getenv("PROXIES_FILE", "proxies.txt")
-FALLBACK_TO_DIRECT_CONNECTION = os.getenv("FALLBACK_TO_DIRECT_CONNECTION", "False").lower() in ("true", "1", "yes")
+FALLBACK_TO_DIRECT_CONNECTION = os.getenv(
+    "FALLBACK_TO_DIRECT_CONNECTION", "False").lower() in ("true", "1", "yes")
+
+# --- Download feature -------------------------------------------------------
+# Disabled by default. Fetching full audio is far more detectable by Tidal than
+# ordinary streaming, so this must be an explicit, informed opt-in.
+ENABLE_DOWNLOADS = os.getenv(
+    "ENABLE_DOWNLOADS", "False").lower() in ("true", "1", "yes")
+DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "downloads")
+DOWNLOAD_TEMPLATE = os.getenv(
+    "DOWNLOAD_TEMPLATE", "{artist}/{album}/{number:02d}. {title}"
+)
+DOWNLOAD_QUALITY = os.getenv("DOWNLOAD_QUALITY", "HI_RES_LOSSLESS")
+# Skip a download when the target file already exists.
+DOWNLOAD_SKIP_EXISTING = os.getenv(
+    "DOWNLOAD_SKIP_EXISTING", "True").lower() in ("true", "1", "yes")
+# Hard ceiling per track, guarding against unbounded disk use.
+DOWNLOAD_MAX_BYTES = int(
+    os.getenv("DOWNLOAD_MAX_BYTES", str(2 * 1024 * 1024 * 1024)))
+# Maximum tracks a single album/playlist request may expand to.
+DOWNLOAD_MAX_ITEMS = int(os.getenv("DOWNLOAD_MAX_ITEMS", "500"))
+
+# Serverless platforms have an ephemeral, read-only-ish filesystem and a hard
+# execution timeout, so persisting audio is impossible there. The stateless
+# resolve endpoint still works.
+IS_SERVERLESS = os.getenv("VERCEL") == "1" or os.getenv(
+    "AWS_LAMBDA_FUNCTION_NAME") is not None
+
 # Maximum number of proxy candidates to test per get_working_proxy() call
 MAX_PROXY_CANDIDATES = 10
 # Maximum number of concurrent proxy tests inside get_working_proxy()
@@ -173,6 +205,7 @@ _RATE_LIMIT_MAX_RETRIES = 3
 _RATE_LIMIT_BASE_DELAY = 1.0
 _RATE_LIMIT_MAX_DELAY = 10.0
 
+
 def _log_response(method: str, url: str, resp: httpx.Response):
     if not DEV_MODE:
         return
@@ -185,12 +218,15 @@ def _log_response(method: str, url: str, resp: httpx.Response):
         resp.text[:2000],
     )
 
+
 try:
     MAX_RETRIES = int(_max_retries_raw)
 except ValueError:
     MAX_RETRIES = 2
 if MAX_RETRIES < 1:
     MAX_RETRIES = 1
+
+
 def load_proxies():
     """Load proxies from file into the global _proxies list."""
     global _proxies
@@ -235,7 +271,8 @@ async def get_working_proxy(avoid_proxy: Optional[str] = None) -> Optional[str]:
 
     # Exclude the already-tested cached proxy and cap the candidate list
     if _last_known_good_proxy:
-        candidate_proxies = [p for p in candidate_proxies if p != _last_known_good_proxy]
+        candidate_proxies = [
+            p for p in candidate_proxies if p != _last_known_good_proxy]
     candidate_proxies = candidate_proxies[:MAX_PROXY_CANDIDATES]
 
     # Test candidates concurrently, returning the first one that succeeds
@@ -260,9 +297,11 @@ async def get_working_proxy(avoid_proxy: Optional[str] = None) -> Optional[str]:
         _last_known_good_proxy = selected_proxy[0]
     return selected_proxy[0]
 
+
 async def _delayed_close(client: httpx.AsyncClient):
     await asyncio.sleep(15)
     await client.aclose()
+
 
 async def update_global_client(force_new_proxy: bool = False):
     global _http_client, _http_client_proxy_url
@@ -276,10 +315,13 @@ async def update_global_client(force_new_proxy: bool = False):
             proxy_url = await get_working_proxy(avoid_proxy=proxy_to_avoid)
             if not proxy_url:
                 if FALLBACK_TO_DIRECT_CONNECTION:
-                    logger.warning("Could not find a working proxy, falling back to direct connection. HOST IP MAY BE EXPOSED!")
+                    logger.warning(
+                        "Could not find a working proxy, falling back to direct connection. HOST IP MAY BE EXPOSED!")
                 else:
-                    logger.error("Could not find a working proxy and FALLBACK_TO_DIRECT_CONNECTION is False.")
-                    raise HTTPException(status_code=503, detail="Service Unavailable")
+                    logger.error(
+                        "Could not find a working proxy and FALLBACK_TO_DIRECT_CONNECTION is False.")
+                    raise HTTPException(
+                        status_code=503, detail="Service Unavailable")
 
         # Only create a new client if the proxy is actually different
         if _http_client and _http_client_proxy_url == proxy_url:
@@ -304,7 +346,8 @@ if os.path.exists(TOKEN_FILE):
             token_data = [token_data]
 
         for entry in token_data:
-            is_catalog = entry.get("role") == "catalog" or entry.get("catalog") is True
+            is_catalog = entry.get(
+                "role") == "catalog" or entry.get("catalog") is True
             cred = {
                 "client_id": entry.get("client_ID") or CLIENT_ID,
                 "client_secret": entry.get("client_secret") or CLIENT_SECRET,
@@ -319,7 +362,8 @@ if os.path.exists(TOKEN_FILE):
                     if _catalog_cred is None:
                         _catalog_cred = cred
                     else:
-                        logger.warning("Ignoring additional catalog credential in %s", TOKEN_FILE)
+                        logger.warning(
+                            "Ignoring additional catalog credential in %s", TOKEN_FILE)
                 elif not any(c["refresh_token"] == cred["refresh_token"] for c in _creds):
                     _creds.append(cred)
 
@@ -363,7 +407,8 @@ if _creds:
 
 def _pick_credential() -> dict:
     if not _creds:
-        raise HTTPException(status_code=500, detail="No Tidal credentials available; populate token.json")
+        raise HTTPException(
+            status_code=500, detail="No Tidal credentials available; populate token.json")
     return random.choice(_creds)
 
 
@@ -395,7 +440,8 @@ class PlaybackCredentialPool:
 
     def try_acquire(self) -> Optional[dict]:
         if self._size == 0:
-            raise HTTPException(status_code=500, detail="No Tidal playback credentials available; populate token.json")
+            raise HTTPException(
+                status_code=500, detail="No Tidal playback credentials available; populate token.json")
         try:
             return self._available.get_nowait()
         except asyncio.QueueEmpty:
@@ -407,7 +453,8 @@ class PlaybackCredentialPool:
     @asynccontextmanager
     async def lease(self) -> AsyncIterator[dict]:
         if self._size == 0:
-            raise HTTPException(status_code=500, detail="No Tidal playback credentials available; populate token.json")
+            raise HTTPException(
+                status_code=500, detail="No Tidal playback credentials available; populate token.json")
 
         cred = await self._available.get()
         try:
@@ -430,6 +477,10 @@ class PlaybackJob:
     error_status: int = 500
     finished_at: Optional[float] = None
     task: Optional[asyncio.Task] = None
+    # Optional progress reporting for long-running operations such as downloads.
+    # Kept out of the core job contract so simple requests are unaffected.
+    progress: Optional[dict] = None
+    results: Optional[List[dict]] = None
 
 
 _playback_jobs: Dict[str, PlaybackJob] = {}
@@ -450,7 +501,8 @@ def _prune_playback_jobs() -> None:
 def _playback_job_position(job: PlaybackJob) -> int:
     if job.state != "pending":
         return 0
-    pending = [queued for queued in _playback_jobs.values() if queued.state == "pending"]
+    pending = [queued for queued in _playback_jobs.values()
+               if queued.state == "pending"]
     try:
         return pending.index(job) + 1
     except ValueError:
@@ -459,7 +511,7 @@ def _playback_job_position(job: PlaybackJob) -> int:
 
 def _playback_job_payload(job: PlaybackJob) -> dict:
     status_url = f"/playback/requests/{job.request_id}"
-    return {
+    payload = {
         "status": job.state,
         "requestId": job.request_id,
         "queuePosition": _playback_job_position(job),
@@ -468,6 +520,11 @@ def _playback_job_payload(job: PlaybackJob) -> dict:
         "playbackAccounts": _playback_pool.size,
         "activePlaybackRequests": _playback_pool.size - _playback_pool.available,
     }
+    if job.progress is not None:
+        payload["progress"] = job.progress
+    if job.results is not None:
+        payload["results"] = job.results
+    return payload
 
 
 def _pending_playback_response(job: PlaybackJob) -> JSONResponse:
@@ -538,9 +595,11 @@ async def get_http_client() -> httpx.AsyncClient:
                 if USE_PROXIES:
                     proxy_url = await get_working_proxy()
                     if not proxy_url and not FALLBACK_TO_DIRECT_CONNECTION:
-                        raise HTTPException(status_code=503, detail="Service Unavailable")
+                        raise HTTPException(
+                            status_code=503, detail="Service Unavailable")
                     elif not proxy_url and FALLBACK_TO_DIRECT_CONNECTION:
-                        logger.warning("Could not find a working proxy, falling back to direct connection. HOST IP MAY BE EXPOSED!")
+                        logger.warning(
+                            "Could not find a working proxy, falling back to direct connection. HOST IP MAY BE EXPOSED!")
                 _http_client = _build_http_client(proxy_url)
                 _http_client_proxy_url = proxy_url
     return _http_client
@@ -571,14 +630,16 @@ async def refresh_tidal_token(cred: Optional[dict] = None):
                     },
                     auth=(cred["client_id"], cred["client_secret"]),
                 )
-                _log_response("POST", "https://auth.tidal.com/v1/oauth2/token", res)
+                _log_response(
+                    "POST", "https://auth.tidal.com/v1/oauth2/token", res)
 
                 if res.status_code in [400, 401]:
                     try:
                         error_data = res.json()
                         if error_data.get("error") in ["invalid_client", "invalid_grant"]:
                             logger.error(f"Tidal Auth Error: {error_data}")
-                            raise HTTPException(status_code=401, detail=f"Tidal Auth Error: {error_data.get('error_description')}")
+                            raise HTTPException(
+                                status_code=401, detail=f"Tidal Auth Error: {error_data.get('error_description')}")
                     except ValueError:
                         pass
 
@@ -593,16 +654,20 @@ async def refresh_tidal_token(cred: Optional[dict] = None):
                 return new_token
             except httpx.RequestError as e:
                 if USE_PROXIES and attempt < max_retries - 1:
-                    logger.warning(f"Proxy failed during token refresh: {e}. Healing proxy...")
+                    logger.warning(
+                        f"Proxy failed during token refresh: {e}. Healing proxy...")
                     await update_global_client(force_new_proxy=True)
                     continue
-                raise HTTPException(status_code=401, detail=f"Token refresh failed: {str(e)}")
+                raise HTTPException(
+                    status_code=401, detail=f"Token refresh failed: {str(e)}")
             except httpx.HTTPStatusError as e:
                 if USE_PROXIES and e.response.status_code in [403, 429] and attempt < max_retries - 1:
-                    logger.warning(f"Proxy blocked during token refresh ({e.response.status_code}). Healing proxy...")
+                    logger.warning(
+                        f"Proxy blocked during token refresh ({e.response.status_code}). Healing proxy...")
                     await update_global_client(force_new_proxy=True)
                     continue
-                raise HTTPException(status_code=401, detail=f"Token refresh failed: {str(e)}")
+                raise HTTPException(
+                    status_code=401, detail=f"Token refresh failed: {str(e)}")
 
 
 async def get_tidal_token(force_refresh: bool = False):
@@ -662,7 +727,8 @@ async def make_request(
                 _log_response("GET (retry after 401)", url, resp)
 
             if resp.status_code == 429 and attempt < _RATE_LIMIT_MAX_RETRIES:
-                delay = min(_RATE_LIMIT_BASE_DELAY * (2 ** attempt), _RATE_LIMIT_MAX_DELAY)
+                delay = min(_RATE_LIMIT_BASE_DELAY *
+                            (2 ** attempt), _RATE_LIMIT_MAX_DELAY)
                 retry_after = resp.headers.get("Retry-After")
                 if retry_after:
                     try:
@@ -670,7 +736,8 @@ async def make_request(
                     except ValueError:
                         pass
                 delay = min(delay, _RATE_LIMIT_MAX_DELAY)
-                logger.warning("Upstream 429 for %s, retrying in %.1fs (attempt %d/%d)", url, delay, attempt + 1, _RATE_LIMIT_MAX_RETRIES)
+                logger.warning("Upstream 429 for %s, retrying in %.1fs (attempt %d/%d)",
+                               url, delay, attempt + 1, _RATE_LIMIT_MAX_RETRIES)
                 await asyncio.sleep(delay)
                 continue
 
@@ -679,7 +746,8 @@ async def make_request(
                 if fresh_token != token:
                     headers = {"authorization": f"Bearer {fresh_token}"}
                     resp = await client.get(url, headers=headers, params=params)
-                    _log_response("GET (retry after 404 token refresh)", url, resp)
+                    _log_response(
+                        "GET (retry after 404 token refresh)", url, resp)
                     token, cred = fresh_token, fresh_cred
 
             break
@@ -694,11 +762,13 @@ async def make_request(
             e.response.text[:1000],
             exc_info=e,
         )
-        raise HTTPException(status_code=e.response.status_code, detail="Upstream API error")
+        raise HTTPException(status_code=e.response.status_code,
+                            detail="Upstream API error")
     except httpx.RequestError as e:
         if isinstance(e, httpx.TimeoutException):
             raise HTTPException(status_code=429, detail="Upstream timeout")
-        raise HTTPException(status_code=503, detail="Connection error to Tidal")
+        raise HTTPException(
+            status_code=503, detail="Connection error to Tidal")
 
 
 async def authed_get_json(
@@ -729,7 +799,8 @@ async def authed_get_json(
                 _log_response("GET (retry after 401)", url, resp)
 
             if resp.status_code == 429 and attempt < _RATE_LIMIT_MAX_RETRIES:
-                delay = min(_RATE_LIMIT_BASE_DELAY * (2 ** attempt), _RATE_LIMIT_MAX_DELAY)
+                delay = min(_RATE_LIMIT_BASE_DELAY *
+                            (2 ** attempt), _RATE_LIMIT_MAX_DELAY)
                 retry_after = resp.headers.get("Retry-After")
                 if retry_after:
                     try:
@@ -737,7 +808,8 @@ async def authed_get_json(
                     except ValueError:
                         pass
                 delay = min(delay, _RATE_LIMIT_MAX_DELAY)
-                logger.warning("Upstream 429 for %s, retrying in %.1fs (attempt %d/%d)", url, delay, attempt + 1, _RATE_LIMIT_MAX_RETRIES)
+                logger.warning("Upstream 429 for %s, retrying in %.1fs (attempt %d/%d)",
+                               url, delay, attempt + 1, _RATE_LIMIT_MAX_RETRIES)
                 await asyncio.sleep(delay)
                 continue
 
@@ -746,7 +818,8 @@ async def authed_get_json(
                 if fresh_token != token:
                     headers["authorization"] = f"Bearer {fresh_token}"
                     resp = await client.get(url, headers=headers, params=params)
-                    _log_response("GET (retry after 404 token refresh)", url, resp)
+                    _log_response(
+                        "GET (retry after 404 token refresh)", url, resp)
                     token, cred = fresh_token, fresh_cred
 
             break
@@ -761,11 +834,13 @@ async def authed_get_json(
             e.response.text[:1000],
             exc_info=e,
         )
-        raise HTTPException(status_code=e.response.status_code, detail="Upstream API error")
+        raise HTTPException(status_code=e.response.status_code,
+                            detail="Upstream API error")
     except httpx.RequestError as e:
         if isinstance(e, httpx.TimeoutException):
             raise HTTPException(status_code=429, detail="Upstream timeout")
-        raise HTTPException(status_code=503, detail="Connection error to Tidal")
+        raise HTTPException(
+            status_code=503, detail="Connection error to Tidal")
 
 
 async def make_playback_request_for_cred(cred: dict, url: str, params: Optional[dict] = None):
@@ -785,7 +860,8 @@ async def get_playback_request(request_id: str):
     _prune_playback_jobs()
     job = _playback_jobs.get(request_id)
     if job is None:
-        raise HTTPException(status_code=404, detail="Playback request not found or expired")
+        raise HTTPException(
+            status_code=404, detail="Playback request not found or expired")
 
     if job.state in ("pending", "processing"):
         return _pending_playback_response(job)
@@ -794,11 +870,13 @@ async def get_playback_request(request_id: str):
     if job.state == "cancelled":
         return JSONResponse(
             status_code=410,
-            content={**_playback_job_payload(job), "detail": "Playback request was cancelled"},
+            content={
+                **_playback_job_payload(job), "detail": "Playback request was cancelled"},
         )
     return JSONResponse(
         status_code=job.error_status,
-        content={**_playback_job_payload(job), "detail": job.error or "Playback request failed"},
+        content={
+            **_playback_job_payload(job), "detail": job.error or "Playback request failed"},
     )
 
 
@@ -808,7 +886,8 @@ async def cancel_playback_request(request_id: str):
     _prune_playback_jobs()
     job = _playback_jobs.get(request_id)
     if job is None:
-        raise HTTPException(status_code=404, detail="Playback request not found or expired")
+        raise HTTPException(
+            status_code=404, detail="Playback request not found or expired")
     if job.state in ("pending", "processing") and job.task is not None:
         job.task.cancel()
         job.state = "cancelled"
@@ -820,10 +899,12 @@ async def cancel_playback_request(request_id: str):
 async def index():
     return "hifi-api for tapedack by dev"
 
+
 @app.get("/info/")
 async def get_info(id: int):
     url = f"https://api.tidal.com/v1/tracks/{id}/"
     return await make_request(url, params={"countryCode": COUNTRY_CODE})
+
 
 @app.get("/track/")
 async def get_track(id: int, quality: str = "HI_RES_LOSSLESS", immersiveaudio: bool = False):
@@ -835,7 +916,8 @@ async def get_track(id: int, quality: str = "HI_RES_LOSSLESS", immersiveaudio: b
         "immersiveaudio": immersiveaudio
     }
     return await dispatch_playback_request(
-        lambda cred: make_playback_request_for_cred(cred, track_url, params=params)
+        lambda cred: make_playback_request_for_cred(
+            cred, track_url, params=params)
     )
 
 
@@ -843,7 +925,8 @@ async def get_track(id: int, quality: str = "HI_RES_LOSSLESS", immersiveaudio: b
 async def get_track_manifests(
     id: str,
     request: Request,
-    formats: List[str] = Query(default=["HEAACV1", "AACLC", "FLAC", "FLAC_HIRES", "EAC3_JOC"]),
+    formats: List[str] = Query(
+        default=["HEAACV1", "AACLC", "FLAC", "FLAC_HIRES", "EAC3_JOC"]),
     adaptive: str = Query(default="true"),
     manifestType: str = Query(default="MPEG_DASH"),
     uriScheme: str = Query(default="HTTPS"),
@@ -874,6 +957,8 @@ async def get_track_manifests(
     return await dispatch_playback_request(fetch_manifest)
 
 # Not really necessary but I'm including it anyway
+
+
 @app.api_route("/widevine", methods=["GET", "POST"])
 async def widevine_proxy(request: Request):
     client = await get_http_client()
@@ -900,10 +985,12 @@ async def widevine_proxy(request: Request):
             return Response(
                 content=resp.content,
                 status_code=resp.status_code,
-                headers={"Content-Type": resp.headers.get("Content-Type", "application/json")}
+                headers={
+                    "Content-Type": resp.headers.get("Content-Type", "application/json")}
             )
         except Exception as e:
-            raise HTTPException(status_code=502, detail="Error communicating with widevine server") from e
+            raise HTTPException(
+                status_code=502, detail="Error communicating with widevine server") from e
 
     return await dispatch_playback_request(fetch_license)
 
@@ -980,7 +1067,9 @@ async def search(
         if value:
             return await make_request(url, params=params)
 
-    raise HTTPException(status_code=400, detail="Provide one of s, a, al, v, p, or i")
+    raise HTTPException(
+        status_code=400, detail="Provide one of s, a, al, v, p, or i")
+
 
 @app.get("/album/")
 async def get_album(
@@ -1011,7 +1100,8 @@ async def get_album(
     while remaining_limit > 0:
         chunk_size = min(remaining_limit, max_chunk)
         tasks.append(
-            fetch(items_url, {"countryCode": COUNTRY_CODE, "limit": chunk_size, "offset": current_offset})
+            fetch(items_url, {"countryCode": COUNTRY_CODE,
+                  "limit": chunk_size, "offset": current_offset})
         )
         current_offset += chunk_size
         remaining_limit -= chunk_size
@@ -1023,7 +1113,8 @@ async def get_album(
 
     all_items = []
     for page in items_pages:
-        page_items = page.get("items", page) if isinstance(page, dict) else page
+        page_items = page.get("items", page) if isinstance(
+            page, dict) else page
         if isinstance(page_items, list):
             all_items.extend(page_items)
 
@@ -1099,7 +1190,8 @@ async def get_playlist(
 
     playlist_data, items_data = await asyncio.gather(
         fetch(playlist_url, {"countryCode": COUNTRY_CODE}),
-        fetch(items_url, {"countryCode": COUNTRY_CODE, "limit": limit, "offset": offset}),
+        fetch(items_url, {"countryCode": COUNTRY_CODE,
+              "limit": limit, "offset": offset}),
     )
 
     return {
@@ -1186,17 +1278,18 @@ async def get_similar_albums(
         if art_data := inc.get("relationships", {}).get("coverArt", {}).get("data"):
             if artwork := artworks_map.get(art_data[0].get("id")):
                 if files := artwork.get("attributes", {}).get("files"):
-                    cover_id = _extract_uuid_from_tidal_url(files[0].get("href"))
+                    cover_id = _extract_uuid_from_tidal_url(
+                        files[0].get("href"))
 
         artist_list = []
         if art_data := inc.get("relationships", {}).get("artists", {}).get("data"):
-             for a_entry in art_data:
-                 if a_obj := artists_map.get(a_entry["id"]):
-                     a_id = a_obj["id"]
-                     artist_list.append({
-                         "id": int(a_id) if str(a_id).isdigit() else a_id,
-                         "name": a_obj["attributes"]["name"]
-                     })
+            for a_entry in art_data:
+                if a_obj := artists_map.get(a_entry["id"]):
+                    a_id = a_obj["id"]
+                    artist_list.append({
+                        "id": int(a_id) if str(a_id).isdigit() else a_id,
+                        "name": a_obj["attributes"]["name"]
+                    })
 
         return {
             **attr,
@@ -1226,7 +1319,8 @@ async def get_artist(
     """
 
     if id is None and f is None:
-        raise HTTPException(status_code=400, detail="Provide id or f query param")
+        raise HTTPException(
+            status_code=400, detail="Provide id or f query param")
 
     token, cred = await get_catalog_token_for_cred()
 
@@ -1262,8 +1356,10 @@ async def get_artist(
     common_params = {"countryCode": COUNTRY_CODE, "limit": 100}
 
     tasks = [
-        authed_get_json(albums_url, params=common_params, token=token, cred=cred),
-        authed_get_json(albums_url, params={**common_params, "filter": "EPSANDSINGLES"}, token=token, cred=cred),
+        authed_get_json(albums_url, params=common_params,
+                        token=token, cred=cred),
+        authed_get_json(albums_url, params={
+                        **common_params, "filter": "EPSANDSINGLES"}, token=token, cred=cred),
     ]
 
     if skip_tracks:
@@ -1303,7 +1399,8 @@ async def get_artist(
             res = results[2]
             if isinstance(res, tuple) and len(res) > 0:
                 data = res[0]
-                top_tracks = data.get("items", []) if isinstance(data, dict) else data
+                top_tracks = data.get("items", []) if isinstance(
+                    data, dict) else data
             elif isinstance(res, Exception):
                 logger.warning("Error fetching top tracks: %s", res)
 
@@ -1333,7 +1430,8 @@ async def get_artist(
                 return []
             paged_list = modules[0].get("pagedList", {})
             items = paged_list.get("items", [])
-            tracks = [track.get("item", track) if isinstance(track, dict) else track for track in items]
+            tracks = [track.get("item", track) if isinstance(
+                track, dict) else track for track in items]
             return tracks
 
     results = await asyncio.gather(
@@ -1358,7 +1456,8 @@ async def get_cover(
     """Fetch album cover data for a track id or search query."""
 
     if id is None and q is None:
-        raise HTTPException(status_code=400, detail="Provide id or q query param")
+        raise HTTPException(
+            status_code=400, detail="Provide id or q query param")
 
     token, cred = await get_catalog_token_for_cred()
 
@@ -1428,7 +1527,8 @@ async def get_lyrics(id: int):
     url = f"https://api.tidal.com/v1/tracks/{id}/lyrics"
     data, token, cred = await authed_get_json(
         url,
-        params={"countryCode": COUNTRY_CODE, "locale": "en_US", "deviceType": "BROWSER"},
+        params={"countryCode": COUNTRY_CODE,
+                "locale": "en_US", "deviceType": "BROWSER"},
     )
 
     if not data:
@@ -1472,7 +1572,8 @@ async def get_top_videos(
                 if paged_list:
                     items = paged_list.get("items", [])
                     for item in items:
-                        video = item.get("item", item) if isinstance(item, dict) else item
+                        video = item.get("item", item) if isinstance(
+                            item, dict) else item
                         all_videos.append(video)
             elif module_type == "VIDEO" or (module_type and "video" in module_type.lower()):
                 item = module.get("item", module)
@@ -1488,12 +1589,16 @@ async def get_top_videos(
     }
     return response
 
+
 @app.get("/video/")
 async def get_video(
     id: int = Query(..., description="Video ID"),
-    quality: str = Query(default="HIGH", description="Video quality (HIGH, MEDIUM, LOW)"),
-    mode: str = Query(default="STREAM", description="Playback mode (STREAM, OFFLINE)"),
-    presentation: str = Query(default="FULL", description="Asset presentation (FULL, PREVIEW)"),
+    quality: str = Query(
+        default="HIGH", description="Video quality (HIGH, MEDIUM, LOW)"),
+    mode: str = Query(default="STREAM",
+                      description="Playback mode (STREAM, OFFLINE)"),
+    presentation: str = Query(
+        default="FULL", description="Asset presentation (FULL, PREVIEW)"),
 ):
     """Fetch video playback info from Tidal."""
     url = f"https://api.tidal.com/v1/videos/{id}/playbackinfo"
@@ -1515,6 +1620,260 @@ async def get_video(
         return {"version": API_VERSION, "video": data}
 
     return await dispatch_playback_request(fetch_video)
+
+
+# ---------------------------------------------------------------------------
+# Download feature
+# ---------------------------------------------------------------------------
+# Resolve (B) is stateless and works everywhere, including serverless. Writing
+# audio to disk (A) requires a persistent filesystem, so it is opt-in and is
+# refused outright on serverless platforms.
+#
+# The manifest/segment approach follows tiddl (github.com/oskvr37/tiddl),
+# Apache-2.0 licensed.
+
+from download import store as dl_store  # noqa: E402
+from download.ffmpeg import (  # noqa: E402
+    FFmpegError,
+    extract_flac,
+    is_ffmpeg_installed,
+)
+from download.manifest import ManifestError  # noqa: E402
+from download.service import (  # noqa: E402
+    download_segments,
+    fetch_track_stream,
+    normalize_quality,
+)
+
+_download_root: Optional[Path] = None
+
+
+def _get_download_root() -> Path:
+    """Resolve and create the download directory, cached after first use."""
+    global _download_root
+    if _download_root is None:
+        root = Path(DOWNLOAD_DIR).expanduser().resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        _download_root = root
+    return _download_root
+
+
+def _require_downloads_enabled() -> None:
+    if not ENABLE_DOWNLOADS:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Downloads are disabled. Set ENABLE_DOWNLOADS=True to enable. "
+                "Note that bulk audio downloading is readily detected by Tidal "
+                "and may result in account suspension."
+            ),
+        )
+
+
+def _require_persistent_fs() -> None:
+    if IS_SERVERLESS:
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "Writing downloads to disk is not supported on serverless "
+                "deployments. Use /download/resolve/ instead, or run the API "
+                "with Docker or locally."
+            ),
+        )
+
+
+def _resolve_quality(quality: str) -> str:
+    try:
+        return normalize_quality(quality)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+async def _track_metadata_cached(track_id: int) -> dict:
+    """Fetch track metadata via the catalog credential (no playback lease)."""
+    payload, _, _ = await authed_get_json(
+        f"https://api.tidal.com/v1/tracks/{track_id}/",
+        params={"countryCode": COUNTRY_CODE},
+    )
+    return payload if isinstance(payload, dict) else {}
+
+
+def _describe_track_for_filename(track: dict) -> dict:
+    """Pull the fields the path template needs out of a track payload."""
+    album = track.get("album") or {}
+    artists = track.get("artists") or []
+    primary = ""
+
+    if artists:
+        # Prefer a MAIN artist; fall back to the first listed.
+        for artist in artists:
+            if artist.get("type") == "MAIN":
+                primary = artist.get("name") or ""
+                break
+        if not primary:
+            primary = artists[0].get("name") or ""
+    if not primary:
+        primary = (track.get("artist") or {}).get(
+            "name") or album.get("artist") or "Unknown Artist"
+
+    return {
+        "title": track.get("title") or f"Track {track.get('id')}",
+        "artist": primary,
+        "album": album.get("title") or "Unknown Album",
+        "number": track.get("trackNumber") or 0,
+        "year": "",
+        "isrc": track.get("isrc") or "",
+        "quality": "",
+    }
+
+
+@app.get("/download/resolve/")
+async def download_resolve(
+    id: int = Query(..., description="Tidal track ID"),
+    quality: str = Query(default="HI_RES_LOSSLESS"),
+    immersiveaudio: bool = Query(default=False),
+):
+    """Resolve a track's CDN segment URLs without downloading anything.
+
+    Stateless and cheap, so this works on serverless deployments too. Segments
+    are short-lived, so callers should fetch them promptly. This endpoint is
+    always available because it performs no filesystem writes.
+    """
+    resolved = _resolve_quality(quality)
+
+    async def resolve(cred: dict):
+        token, _ = await get_tidal_token_for_cred(cred=cred)
+        client = await get_http_client()
+        parsed = await fetch_track_stream(
+            client,
+            token,
+            id,
+            resolved,
+            country_code=COUNTRY_CODE,
+            immersive_audio=immersiveaudio,
+        )
+        return {
+            "version": API_VERSION,
+            "trackId": id,
+            "requestedQuality": resolved,
+            **parsed.describe(),
+            "urls": parsed.urls,
+        }
+
+    return await dispatch_playback_request(resolve)
+
+
+async def _resolve_track_manifest(cred: dict, track_id: int, quality: str):
+    """Phase 1 of a download: resolve the manifest while holding a lease.
+
+    The returned manifest carries plain CDN URLs, so the credential is only
+    needed for this call.
+    """
+    token, _ = await get_tidal_token_for_cred(cred=cred)
+    client = await get_http_client()
+    return await fetch_track_stream(
+        client, token, track_id, quality, country_code=COUNTRY_CODE
+    )
+
+
+@app.post("/download/track/")
+async def download_track(
+    id: int = Query(..., description="Tidal track ID"),
+    quality: str = Query(default="HI_RES_LOSSLESS"),
+):
+    """Download a single track to the configured download directory.
+
+    Returns a 202 job reference when every playback account is busy, mirroring
+    the queueing behaviour of /track/.
+    """
+    _require_downloads_enabled()
+    _require_persistent_fs()
+    resolved = _resolve_quality(quality)
+
+    root = _get_download_root()
+
+    async def operation(cred: dict):
+        # Fetch metadata first (catalog credential, no lease contention) so the
+        # destination filename is known before any bytes are written.
+        try:
+            track = await _track_metadata_cached(id)
+        except HTTPException:
+            track = {}
+
+        # Phase 1: manifest, using the leased playback credential.
+        parsed = await _resolve_track_manifest(cred, id, resolved)
+
+        fields = _describe_track_for_filename(track)
+        fields["quality"] = resolved
+
+        target = dl_store.build_track_path(
+            root,
+            template=DOWNLOAD_TEMPLATE,
+            extension=parsed.file_extension,
+            **fields,
+        )
+        target = dl_store.ensure_inside(root, target)
+
+        if DOWNLOAD_SKIP_EXISTING and target.exists():
+            return {
+                "version": API_VERSION,
+                "trackId": id,
+                "status": "exists",
+                "path": str(target),
+                "bytes": target.stat().st_size,
+            }
+
+        # Phase 2: fetch segments from the CDN. No credential is needed here,
+        # and the lease is released by dispatch_playback_request once this
+        # coroutine returns, so the transfer is not serialised on the account
+        # pool any longer than necessary.
+        client = await get_http_client()
+        written = await dl_store.atomic_write_stream(
+            target,
+            download_segments(client, parsed.urls),
+        )
+
+        if DOWNLOAD_MAX_BYTES and written > DOWNLOAD_MAX_BYTES:
+            target.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=413,
+                detail=f"Download exceeded DOWNLOAD_MAX_BYTES ({written} bytes)",
+            )
+
+        final_path = target
+        if parsed.needs_flac_extraction:
+            if is_ffmpeg_installed():
+                try:
+                    final_path = extract_flac(target)
+                except FFmpegError as exc:
+                    logger.warning(
+                        "FLAC extraction failed, keeping MP4: %s", exc)
+            else:
+                logger.warning(
+                    "ffmpeg not installed; keeping FLAC-in-MP4 for track %s", id
+                )
+
+        return {
+            "version": API_VERSION,
+            "trackId": id,
+            "status": "downloaded",
+            "path": str(final_path),
+            "bytes": written,
+            "requestedQuality": resolved,
+            "audioQuality": parsed.audio_quality,
+            "audioMode": parsed.audio_mode,
+            "codecs": parsed.codecs,
+            "bitDepth": parsed.bit_depth,
+            "sampleRate": parsed.sample_rate,
+        }
+
+    return await dispatch_playback_request(operation)
+
+
+@app.get("/download/requests/{request_id}")
+async def get_download_request(request_id: str):
+    """Poll a download job. Shares the playback job store."""
+    return await get_playback_request(request_id)
 
 
 if __name__ == "__main__":
